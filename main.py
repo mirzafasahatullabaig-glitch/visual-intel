@@ -1,15 +1,23 @@
-"""Webcam visual intelligence, terminal version.
+"""Real-time webcam visual intelligence.
 
-Live camera window. Keys (click the video window first so it gets the keys):
-  SPACE  capture a frame and describe it
-  q      capture a frame and type your own question in the terminal
+The video stays live at full speed. A background thread keeps sending the
+newest frame to the model and the latest answer is drawn on the video.
+(A 4B model needs ~2-3 s per answer on an 8 GB GPU, so the text updates
+every few seconds while the video itself never freezes.)
+
+Video window keys (click the window first):
+  SPACE  pause / resume analysis
   m      switch model (Gemma <-> Qwen)
   ESC    quit
+Terminal: type a question + Enter and it is asked about every new frame
+          (e.g. "Is there a person?"). Empty Enter = back to describing.
 
 Run:  python main.py            (uses vlm.DEFAULT_MODEL)
       python main.py qwen       (start with Qwen3-VL 2B)
 """
 import sys
+import textwrap
+import threading
 import time
 
 import cv2
@@ -17,61 +25,111 @@ import cv2
 import vlm
 
 DESCRIBE = (
-    "Describe this scene. List the objects you can see, where they are "
-    "(left/right/centre, front/back), and any notable colours or details. "
-    "Say whether a person is present. Be concise."
+    "Describe what you see in one sentence of at most 30 words: any person, "
+    "the main objects and where they are. No preamble."
 )
+MAX_TOKENS = 60  # shorter answers = faster updates
+
+# Shared between the camera loop, the model thread and the question thread.
+# Each value is replaced whole (never edited in place), which is safe across threads in Python.
+S = {
+    "frame": None,
+    "prompt": DESCRIBE,
+    "model": vlm.QWEN if "qwen" in sys.argv[1:] else vlm.DEFAULT_MODEL,
+    "header": "Analysing...",
+    "text": "",
+    "paused": False,
+    "running": True,
+}
 
 
-def capture_jpeg(frame):
-    # Smaller image = fewer tokens = faster answer; 640px wide is enough for a desk scene.
+def to_jpeg(frame):
     h, w = frame.shape[:2]
     if w > 640:
         frame = cv2.resize(frame, (640, int(h * 640 / w)))
-    ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    return buf.tobytes()
+    return cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes()
 
 
-def run_query(frame, prompt, model):
-    print(f"\n[{model}] {prompt}")
-    t = time.time()
-    try:
-        answer = vlm.ask(capture_jpeg(frame), prompt, model=model)
-    except Exception as e:  # Ollama down, model missing, timeout...
-        print(f"  ERROR: {e}  (is Ollama running? try: ollama ps)")
-        return
-    print(f"  ({time.time() - t:.1f}s)\n{answer}\n")
+def analyse_loop():
+    """Background thread: as soon as one answer is done, ask about the newest frame."""
+    while S["running"]:
+        frame = S["frame"]
+        if S["paused"] or frame is None:
+            time.sleep(0.1)
+            continue
+        prompt, model = S["prompt"], S["model"]
+        t = time.time()
+        try:
+            answer = vlm.ask(to_jpeg(frame), prompt, model=model, max_tokens=MAX_TOKENS)
+        except Exception as e:  # Ollama down, model missing, timeout...
+            S["header"], S["text"] = "ERROR (is Ollama running?)", str(e)
+            time.sleep(2)  # don't hammer a dead server
+            continue
+        secs = time.time() - t
+        if answer.rfind(".") > 0:  # MAX_TOKENS can cut mid-sentence; keep only full sentences
+            answer = answer[: answer.rfind(".") + 1]
+        S["header"] = f"{model} | {secs:.1f}s" + ("" if prompt == DESCRIBE else f" | Q: {prompt}")
+        S["text"] = answer
+        print(f"[{model} {secs:.1f}s] {answer}", flush=True)
+
+
+def read_questions():
+    """Background thread: terminal input changes what the model is asked."""
+    while S["running"]:
+        try:
+            question = input().strip()
+        except EOFError:  # no terminal attached
+            return
+        S["prompt"] = question or DESCRIBE
+        print(f"Now asking: {S['prompt']}", flush=True)
+
+
+def draw_answer(img):
+    """Dark box at the bottom of the video with the latest answer."""
+    # putText can't draw unicode or markdown; strip them.
+    clean = S["text"].replace("*", "").encode("ascii", "ignore").decode()
+    status = "  [PAUSED]" if S["paused"] else ""
+    lines = (textwrap.wrap(S["header"] + status, 64) + textwrap.wrap(clean, 64))[:8]
+    h, w = img.shape[:2]
+    top = h - 22 * len(lines) - 10
+    box = img.copy()
+    cv2.rectangle(box, (0, top), (w, h), (0, 0, 0), -1)
+    cv2.addWeighted(box, 0.6, img, 0.4, 0, img)
+    for i, line in enumerate(lines):
+        color = (0, 255, 255) if i == 0 else (255, 255, 255)  # yellow header
+        cv2.putText(img, line, (8, top + 20 + 22 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
 
 
 def main():
-    model = vlm.QWEN if "qwen" in sys.argv[1:] else vlm.DEFAULT_MODEL
     # CAP_DSHOW opens the Windows webcam much faster than the default backend.
     cam = cv2.VideoCapture(0, cv2.CAP_DSHOW)
     if not cam.isOpened():
         sys.exit("Could not open webcam 0. Is another app (Teams, Camera) using it?")
 
     print(__doc__)
-    print(f"Model: {model}")
-    while True:
+    print(f"Model: {S['model']}")
+    threading.Thread(target=analyse_loop, daemon=True).start()
+    threading.Thread(target=read_questions, daemon=True).start()
+
+    while S["running"]:
         ok, frame = cam.read()
         if not ok:
             print("Lost camera frame; stopping.")
             break
-        cv2.imshow("Visual Intelligence (SPACE describe, q ask, m model, ESC quit)", frame)
+        S["frame"] = frame
+        shown = frame.copy()  # draw text on a copy so the model never sees the overlay
+        draw_answer(shown)
+        cv2.imshow("Visual Intelligence (SPACE pause, m model, ESC quit)", shown)
         key = cv2.waitKey(1) & 0xFF
         if key == 27:  # ESC
             break
         elif key == ord(" "):
-            run_query(frame, DESCRIBE, model)
-        elif key == ord("q"):
-            # The video window freezes while you type; that's expected for a terminal prototype.
-            question = input("Your question: ").strip()
-            if question:
-                run_query(frame, question, model)
+            S["paused"] = not S["paused"]
         elif key == ord("m"):
-            model = vlm.QWEN if model == vlm.GEMMA else vlm.GEMMA
-            print(f"Switched to {model}")
+            S["model"] = vlm.QWEN if S["model"] == vlm.GEMMA else vlm.GEMMA
+            print(f"Switched to {S['model']}", flush=True)
 
+    S["running"] = False
     cam.release()
     cv2.destroyAllWindows()
 

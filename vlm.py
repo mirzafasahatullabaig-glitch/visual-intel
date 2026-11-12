@@ -18,18 +18,22 @@ QWEN = "qwen3-vl:2b-instruct"
 DEFAULT_MODEL = GEMMA
 
 
-def ask(image_bytes, prompt, model=DEFAULT_MODEL, timeout=120):
+def ask(image_bytes, prompt, model=DEFAULT_MODEL, timeout=120, max_tokens=None):
     """Send JPEG/PNG bytes + a question to the model, return its text answer.
 
     image_bytes: raw encoded image (e.g. from cv2.imencode or a file read)
     prompt:      what to ask about the image
+    max_tokens:  cap the answer length; fewer tokens = faster reply (real-time mode)
     """
     payload = {
         "model": model,
         "prompt": prompt,
         "images": [base64.b64encode(image_bytes).decode()],
         "stream": False,  # one JSON object back, not a token stream
+        "keep_alive": "30m",  # keep the model in VRAM so there is no reload pause
     }
+    if max_tokens:
+        payload["options"] = {"num_predict": max_tokens}
     req = urllib.request.Request(
         OLLAMA_URL,
         data=json.dumps(payload).encode(),
