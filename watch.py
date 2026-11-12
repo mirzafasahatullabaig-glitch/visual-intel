@@ -2,10 +2,11 @@
 
 Events (normal):  'person #1 appeared at centre', 'person #1 left; last seen at right'
 Alerts (unusual):
-  - an object disappears from view
+  - an object that had been in view for at least SETTLED seconds disappears
   - a person enters the restricted zone (drawn with the mouse in main.py)
   - an object is left unattended: it arrived while the program was running
-    and now sits there with nobody in view for UNATTENDED seconds
+    and has now sat there with nobody in view for UNATTENDED seconds
+Objects seen only briefly never raise alerts: they are usually detector mistakes.
 Not covered: detecting that an object FELL (boxes alone can't tell a fall
 from someone moving the object down; that needs a pose/motion model).
 """
@@ -15,6 +16,7 @@ import track
 
 UNATTENDED = 20  # seconds with nobody in view before a newly arrived object is flagged
 STARTUP = 5      # objects already present in the first seconds are background, not 'left behind'
+SETTLED = 10     # seconds an object must have been in view before its disappearance is an alert
 
 
 class Watcher:
@@ -30,7 +32,8 @@ class Watcher:
             place = f"at {t['where']}" + (f" (near {t['near']})" if t["near"] else "")
             if kind == "entered":
                 out.append((f"{track.label(t)} appeared {place}", False))
-            elif t["name"] == "person":
+            elif t["name"] == "person" or t["last"] - t["first"] < SETTLED:
+                # People come and go; and something seen only briefly is usually a detector mistake.
                 out.append((f"{track.label(t)} left; last seen {place}", False))
             else:
                 out.append((f"{track.label(t)} disappeared; last seen {place}", True))
@@ -48,7 +51,8 @@ class Watcher:
         if now - self.last_person > UNATTENDED:
             for t in visible:
                 arrived_later = t["first"] > self.start + STARTUP
-                if t["name"] != "person" and arrived_later and not t.get("flagged"):
+                stayed = now - t["first"] > UNATTENDED  # a 2-second detector mistake is not an abandoned object
+                if t["name"] != "person" and arrived_later and stayed and not t.get("flagged"):
                     t["flagged"] = True
                     out.append((f"{track.label(t)} left unattended at {t['where']}", True))
         return out
@@ -74,5 +78,10 @@ if __name__ == "__main__":
     assert log[-1] == "backpack #3 left unattended at bottom-left" and len(log) == 2, log
     step([], 40.0)        # backpack vanishes
     assert log[-1] == "backpack #3 disappeared; last seen at bottom-left", log
+    # Something seen for only 2 s (a detector mistake) with nobody around must raise no alert at all.
+    for i in range(60):
+        step([("refrigerator", 0.5, [300, 100, 100, 200])], 50 + i / 30)
+    step([], 60.0)
+    assert len(log) == 3, log[3:]
     print("\n".join(log))
     print("OK: alerts work.")

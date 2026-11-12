@@ -10,7 +10,8 @@ The video stays live at full speed. Background threads work on the newest frame:
 Video window (click it first):
   SPACE       pause / resume scene descriptions
   m           switch model (Gemma <-> Qwen)
-  v           voice question: press, speak, press again; the answer is spoken
+  v           voice question: press once and speak; it stops when you stop
+              talking, and the answer is spoken
   drag mouse  draw the restricted zone       z  clear it
   ESC         quit
 Terminal: type a question + Enter, e.g.  Is my phone on the desk?
@@ -44,7 +45,8 @@ DESCRIBE = (
 QUESTION = (
     "You are a visual assistant looking through a camera. Answer the question in one or two "
     "short sentences, no preamble. Use the image first; use the notes below for exact positions "
-    "and for things that happened earlier. If you cannot tell, say so.\n"
+    "and for things that happened earlier. Left and right mean the left and right of the image. "
+    "If you cannot tell, say so.\n"
     "Object detector, in view right now: {objects}\n"
     "Memory diary of earlier observations:\n{memory}\n"
     "Time now: {now}\n"
@@ -70,7 +72,7 @@ S = {
     "events": [],               # recent (time, text, is_alert)
     "zone": None,               # restricted area (x1, y1, x2, y2)
     "drag": None,
-    "recording": False,
+    "listening": False,         # microphone is recording a voice question
     "paused": False,
     "running": True,
 }
@@ -83,11 +85,29 @@ def to_jpeg(frame):
     return cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes()
 
 
-def note(text, alert=False, frame=None):
-    """Show an event on screen, print it, and save it (with a snapshot) to the diary."""
+def show(text, alert=False):
+    """Show a message on screen for a few seconds and print it."""
     S["events"] = S["events"][-3:] + [(time.time(), text, alert)]
     print(("ALERT " if alert else "      ") + time.strftime("%H:%M:%S ") + text, flush=True)
+
+
+def note(text, alert=False, frame=None):
+    """An observation about the scene: show it and save it (with a snapshot) to the diary."""
+    show(text, alert)
     memory.remember("alert" if alert else "event", text, frame)
+
+
+def guarded(loop):
+    """Wrap a background loop so a crash is reported and the loop restarts.
+    (A thread that dies silently would freeze its feature for the rest of the session.)"""
+    def run():
+        while S["running"]:
+            try:
+                loop()
+            except Exception as e:
+                show(f"{loop.__name__} error, restarting: {e}", alert=True)
+                time.sleep(1)
+    return run
 
 
 def detect_loop():
@@ -128,11 +148,15 @@ def analyse_loop():
             answer = vlm.ask(to_jpeg(frame), prompt, model=model, max_tokens=MAX_TOKENS + 30 * bool(asked))
         except Exception as e:  # Ollama down, model missing, timeout...
             S["header"], S["text"] = "ERROR (is Ollama running?)", str(e)
+            if asked:  # don't leave the question hanging on '...'
+                S["qa"] = (question, "No answer: the model is not reachable. Is Ollama running?")
             time.sleep(2)  # don't hammer a dead server
             continue
         secs = time.time() - t
-        if answer.rfind(".") > 0:  # the token cap can cut mid-sentence; keep only full sentences
-            answer = answer[: answer.rfind(".") + 1]
+        # The token cap can cut mid-sentence: drop an unfinished last sentence.
+        # ('. ' with a space, so a decimal such as 0.5 is never mistaken for a sentence end.)
+        if not answer.endswith((".", "!", "?")) and ". " in answer:
+            answer = answer[: answer.rfind(". ") + 1]
         if asked:
             S["qa"] = (question, answer)
             print(f"\nQ: {question}\nA: {answer}   [{model} {secs:.1f}s]\n", flush=True)
@@ -143,7 +167,7 @@ def analyse_loop():
             S["header"], S["text"] = f"{model} | {secs:.1f}s", answer
             if time.time() - last_saved > MEMORY_EVERY:
                 last_saved = time.time()
-                memory.remember("scene", answer, frame)
+                memory.remember("scene", answer)  # text only: a snapshot every 30 s would be ~100 MB a day
 
 
 def read_questions():
@@ -159,12 +183,20 @@ def read_questions():
 
 
 def ask_by_voice():
-    """After the second 'v': turn the recording into a question (about 1 s, so not in the camera loop)."""
-    question = voice.stop()
-    print(f"Heard: {question!r}", flush=True)
+    """Own thread, started by 'v': record one spoken question and hand it to the VLM."""
+    try:
+        question = voice.listen()
+    except Exception as e:  # microphone busy or unplugged: say so, never crash the app
+        show(f"Microphone error: {e}", alert=True)
+        return
+    finally:
+        S["listening"] = False
     if question:
+        show(f"Heard: {question}")
         S["qa"] = (question, "...")
         S["question"] = (question, True)
+    else:
+        show("Heard nothing. Is the microphone muted?", alert=True)
 
 
 def on_mouse(event, x, y, flags, _):
@@ -177,6 +209,16 @@ def on_mouse(event, x, y, flags, _):
         S["zone"] = (min(x0, x), min(y0, y), max(x0, x), max(y0, y))
         if event == cv2.EVENT_LBUTTONUP:
             S["drag"] = None
+            if abs(x - x0) < 10 or abs(y - y0) < 10:  # a plain click, not a drag: clear the zone
+                S["zone"] = None
+
+
+def window_closed():
+    """True once the user has closed the video window with the X button."""
+    try:
+        return cv2.getWindowProperty(WIN, cv2.WND_PROP_VISIBLE) < 1
+    except cv2.error:  # some OpenCV builds raise once the window is gone
+        return True
 
 
 def lines(text, colour):
@@ -207,8 +249,9 @@ def draw_overlay(img):
     for when, text, alert in S["events"]:
         if time.time() - when < EVENT_SECONDS:
             top += lines(("ALERT: " if alert else "") + text, RED if alert else CYAN)
-    if S["recording"]:
-        top += lines("REC - speak, then press v again", RED)
+    if S["listening"]:  # the bar moves when the microphone hears you
+        bar = "|" * min(30, int(voice.level * 300))
+        top += lines("LISTENING - speak now  " + bar if voice.stage == "listening" else "Working out what you said...", RED)
     text_block(img, top, 0)
 
     # Bottom: live scene description, then the pinned question and answer.
@@ -225,43 +268,52 @@ def main():
     if not cam.isOpened():
         sys.exit("Could not open webcam 0. Is another app (Teams, Camera) using it?")
 
+    sys.stdout.reconfigure(errors="replace")  # an emoji in a model answer must not crash a print
     print(__doc__)
     print(f"Model: {S['model']} | YOLO on {detect.DEVICE} | voice: {'on' if voice else 'off (see voice.py)'} "
           f"| diary: {len(memory.entries)} entries")
     cv2.namedWindow(WIN)
     cv2.setMouseCallback(WIN, on_mouse)
-    for loop in (analyse_loop, detect_loop, read_questions):
+    for loop in (guarded(analyse_loop), guarded(detect_loop), read_questions):
         threading.Thread(target=loop, daemon=True).start()
 
-    while S["running"]:
-        ok, frame = cam.read()
-        if not ok:
-            print("Lost camera frame; stopping.")
-            break
-        S["frame"] = frame
-        shown = frame.copy()  # draw on a copy so neither model sees the overlay
-        draw_overlay(shown)
-        cv2.imshow(WIN, shown)
-        key = cv2.waitKey(1) & 0xFF
-        if key == 27:  # ESC
-            break
-        elif key == ord(" "):
-            S["paused"] = not S["paused"]
-        elif key == ord("m"):
-            S["model"] = vlm.QWEN if S["model"] == vlm.GEMMA else vlm.GEMMA
-            print(f"Switched to {S['model']}", flush=True)
-        elif key == ord("z"):
-            S["zone"] = None
-        elif key == ord("v") and voice:
-            S["recording"] = not S["recording"]
-            if S["recording"]:
-                voice.start()
-            else:
+    failed = 0
+    try:
+        while S["running"]:
+            ok, frame = cam.read()
+            if not ok:
+                failed += 1
+                if failed > 30:  # one dropped frame is normal; a full second of them is not
+                    print("Camera stopped giving frames; stopping.")
+                    break
+                continue
+            failed = 0
+            S["frame"] = frame
+            shown = frame.copy()  # draw on a copy so neither model sees the overlay
+            draw_overlay(shown)
+            cv2.imshow(WIN, shown)
+            key = chr(cv2.waitKey(1) & 0xFF).lower()  # lower(): keys still work with Caps Lock on
+            if key == "\x1b" or window_closed():  # ESC, or the X button
+                break
+            elif key == " ":
+                S["paused"] = not S["paused"]
+            elif key == "m":
+                S["model"] = vlm.QWEN if S["model"] == vlm.GEMMA else vlm.GEMMA
+                show(f"Switched to {S['model']} (first answer takes ~10 s)")
+            elif key == "z":
+                S["zone"] = None
+            elif key == "v" and not voice:
+                show("Voice is not installed; see the note at the top of voice.py", alert=True)
+            elif key == "v" and not S["listening"]:
+                # Holding 'v' repeats the key ~30x a second; ignoring it while listening makes that harmless.
+                S["listening"] = True
                 threading.Thread(target=ask_by_voice, daemon=True).start()
-
-    S["running"] = False
-    cam.release()
-    cv2.destroyAllWindows()
+    except KeyboardInterrupt:  # Ctrl+C in the terminal is a normal way to quit
+        pass
+    finally:
+        S["running"] = False
+        cam.release()
+        cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":

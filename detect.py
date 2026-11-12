@@ -75,6 +75,7 @@ def draw(img, detections):
         cv2.rectangle(img, (x, y), (x + bw, y + bh), (0, 255, 0), 2)
         label = f"{name} {conf:.0%}"
         (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        x, y = max(x, 0), max(y, th + 6)  # keep the label on screen when the box touches an edge
         cv2.rectangle(img, (x, y - th - 6), (x + tw + 4, y), (0, 255, 0), -1)
         cv2.putText(img, label, (x + 2, y - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
 
