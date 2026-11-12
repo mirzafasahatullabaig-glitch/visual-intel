@@ -22,7 +22,7 @@ While `main.py` runs:
 - In the video window: SPACE pauses/resumes analysis, `m` switches model, ESC quits.
 - In the terminal: type a question and press Enter (e.g. `Is there a person?`). It is asked about every new frame. An empty Enter goes back to describing the scene.
 
-How "real time" works: the camera loop only shows frames, so video stays at full speed. A background thread sends the newest frame to the model as soon as the previous answer is done. Measured on an RTX 5050 8 GB: ~2.5 s per answer for both models with a 60-token cap (`MAX_TOKENS` in `main.py`).
+How "real time" works: the camera loop only shows frames, so video stays at full speed. A background thread sends the newest frame to the model as soon as the previous answer is done. Measured on an RTX 5050 8 GB: video 29 fps; Gemma ~3.3 s per answer (60-token cap, `MAX_TOKENS` in `main.py`). Ollama keeps only one of the two models in VRAM, so the first answer after pressing `m` takes ~10 s while the other model loads.
 
 To change the default model, edit `DEFAULT_MODEL` in `vlm.py`.
 
