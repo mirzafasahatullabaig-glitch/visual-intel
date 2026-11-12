@@ -1,9 +1,10 @@
 """Real-time webcam visual intelligence.
 
-The video stays live at full speed. A background thread keeps sending the
-newest frame to the model and the latest answer is drawn on the video.
-(A 4B model needs ~2-3 s per answer on an 8 GB GPU, so the text updates
-every few seconds while the video itself never freezes.)
+The video stays live at full speed. Two background threads work on the
+newest frame:
+  - YOLO (detect.py) draws green boxes around objects, ~30 times a second.
+  - The VLM describes the scene; it needs ~3 s per answer on an 8 GB GPU,
+    so the text updates every few seconds while video and boxes stay live.
 
 Video window keys (click the window first):
   SPACE  pause / resume analysis
@@ -22,6 +23,7 @@ import time
 
 import cv2
 
+import detect
 import vlm
 
 DESCRIBE = (
@@ -38,6 +40,7 @@ S = {
     "model": vlm.QWEN if "qwen" in sys.argv[1:] else vlm.DEFAULT_MODEL,
     "header": "Analysing...",
     "text": "",
+    "detections": [],
     "paused": False,
     "running": True,
 }
@@ -71,6 +74,18 @@ def analyse_loop():
         S["header"] = f"{model} | {secs:.1f}s" + ("" if prompt == DESCRIBE else f" | Q: {prompt}")
         S["text"] = answer
         print(f"[{model} {secs:.1f}s] {answer}", flush=True)
+
+
+def detect_loop():
+    """Background thread: YOLO boxes for each new frame (~34 ms each on CPU)."""
+    last = None
+    while S["running"]:
+        frame = S["frame"]
+        if frame is None or frame is last:  # don't re-detect the same frame
+            time.sleep(0.005)
+            continue
+        last = frame
+        S["detections"] = detect.detect(frame)
 
 
 def read_questions():
@@ -109,6 +124,7 @@ def main():
     print(__doc__)
     print(f"Model: {S['model']}")
     threading.Thread(target=analyse_loop, daemon=True).start()
+    threading.Thread(target=detect_loop, daemon=True).start()
     threading.Thread(target=read_questions, daemon=True).start()
 
     while S["running"]:
@@ -117,7 +133,8 @@ def main():
             print("Lost camera frame; stopping.")
             break
         S["frame"] = frame
-        shown = frame.copy()  # draw text on a copy so the model never sees the overlay
+        shown = frame.copy()  # draw on a copy so neither model sees the overlay
+        detect.draw(shown, S["detections"])
         draw_answer(shown)
         cv2.imshow("Visual Intelligence (SPACE pause, m model, ESC quit)", shown)
         key = cv2.waitKey(1) & 0xFF
