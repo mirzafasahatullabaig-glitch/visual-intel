@@ -1,35 +1,67 @@
 # visual-intel
 
-Webcam + local vision-language model (Ollama) that describes the scene and answers questions about it. Nothing goes to the cloud.
+A webcam + local AI system that sees, tracks, remembers and answers questions about its surroundings. Everything runs on the laptop; nothing goes to the cloud.
 
 ```
-Webcam -> OpenCV (main.py) -+-> YOLO11n via ONNX Runtime GPU (detect.py) -> green boxes, every frame
-                            +-> Ollama VLM (vlm.py) gemma3 / qwen3-vl -> scene description, every ~3 s
+Webcam -> OpenCV (main.py)
+            |-> YOLO11n on GPU (detect.py) -> tracker (track.py) -> events + alerts (watch.py)
+            |-> Ollama VLM (vlm.py): scene descriptions, question answering
+            |-> memory diary (memory.py): timestamped observations + snapshots
+            `-> voice (voice.py): speech-to-text questions, spoken answers
 ```
+
+## What it does
+| Feature | How |
+|---|---|
+| Object detection and localisation | Boxes with names and IDs, position of each object (`top-left`, `centre`...), live count (`In view: 1 person, 2 cup`) |
+| Real-time tracking | Each object keeps its ID across frames; `appeared` / `left` events |
+| Visual reasoning | Ask `Is my phone on the desk?`; the VLM answers from the current image plus the detector's object list |
+| Visual memory | Events, alerts, a scene description every 30 s and all Q&A go to `memory/log.jsonl` with snapshots; `Where did I leave my bottle?` is answered from it. Survives restarts |
+| Anomaly alerts | Object disappeared; person entered the restricted zone; object left unattended (20 s with nobody in view) |
+| Voice | Press `v`, speak, press `v` again; the answer is spoken in a soft female voice |
+
+Not covered: detecting that an object fell (needs a motion/pose model).
 
 ## Requirements
 - Ollama running, with `gemma3:4b` and/or `qwen3-vl:2b-instruct` pulled
-- Python with `opencv-python` and ONNX Runtime: `pip install opencv-python onnxruntime-directml` (Windows, GPU through DirectX 12). On a Raspberry Pi / Linux use `pip install onnxruntime` instead (CPU)
+- Python packages:
+  ```
+  pip install opencv-python onnxruntime-directml sounddevice
+  pip install --no-deps faster-whisper
+  pip install ctranslate2 tokenizers av
+  ```
+  Do not run a plain `pip install faster-whisper`: it installs CPU `onnxruntime`, which replaces `onnxruntime-directml` and puts YOLO back on the CPU. On a Raspberry Pi / Linux use `onnxruntime` (CPU) and `espeak` for speech.
 - `yolo11n.onnx` in this folder (not in git, 10 MB). Make it with `pip install ultralytics` then `yolo export model=yolo11n.pt format=onnx`
 
 ## Use
-| Command | What it does |
+```
+python main.py          # or: python main.py qwen
+```
+| Where | Action |
 |---|---|
-| `python vlm.py` | Self-check: model must call a red test image "red" |
-| `python vlm.py photo.jpg "What is on the table?"` | Ask about an existing image file |
-| `python detect.py [photo.jpg]` | YOLO boxes on one webcam frame (or a file), saved to `detect_test.jpg` |
-| `python main.py` | Real-time: live video with YOLO boxes and the VLM's latest answer drawn on it |
-| `python main.py qwen` | Same, starting with Qwen3-VL 2B |
+| Video window | `SPACE` pause/resume descriptions, `m` switch model, `v` voice question, `z` clear zone, `ESC` quit |
+| Video window | Drag the mouse to draw the restricted zone (red box). A person whose centre enters it raises an alert |
+| Terminal | Type a question + Enter. Empty Enter clears the pinned answer |
 
-While `main.py` runs:
-- In the video window: SPACE pauses/resumes analysis, `m` switches model, ESC quits.
-- In the terminal: type a question and press Enter (e.g. `Is there a person?`). It is asked about every new frame. An empty Enter goes back to describing the scene.
+Each module also runs alone as a self-check:
 
-How "real time" works: the camera loop only shows frames, so video stays at full speed. One background thread runs YOLO on each new frame; another sends the newest frame to the VLM as soon as the previous answer is done. Measured on an RTX 5050 8 GB: video 29 fps, YOLO on every frame (GPU via DirectML: 4 ms model time, ~16 ms with pre/post-processing; CPU was ~35 ms); Gemma ~3.3 s per answer (60-token cap, `MAX_TOKENS` in `main.py`). Ollama keeps only one of the two models in VRAM, so the first answer after pressing `m` takes ~10 s while the other model loads.
+| Command | Checks |
+|---|---|
+| `python vlm.py` | The model calls a red test image "red". `python vlm.py photo.jpg "question"` asks about a file |
+| `python detect.py [photo.jpg]` | YOLO on one webcam frame (or a file); prints speed, saves `detect_test.jpg` |
+| `python track.py` / `watch.py` / `memory.py` | Tracker, alert rules and diary, with made-up data (no camera) |
+| `python voice.py` | The computer speaks a sentence into a file and Whisper must hear it back |
 
-To change the default model, edit `DEFAULT_MODEL` in `vlm.py`.
+## Measured on an RTX 5050 8 GB laptop
+- Video 29 fps with everything running
+- YOLO on every frame: 4 ms model time on GPU (DirectML), ~16 ms with pre/post-processing; CPU was ~35 ms
+- VLM: ~3.5 s per description or answer (Gemma, 60-token cap). Ollama keeps only one of the two models in VRAM, so the first answer after `m` takes ~10 s
 
-## Files
-- `vlm.py`: the only Ollama-specific code. Swap models or backends here.
-- `detect.py`: YOLO11n object boxes. ONNX Runtime runs the model (GPU on Windows, CPU elsewhere, no PyTorch); OpenCV prepares the image, removes duplicate boxes and draws. Tune `CONF` / `NMS` there.
-- `main.py`: camera loop, background threads, overlay and key handling.
+## Files and settings
+- `vlm.py`: the only Ollama-specific code. `DEFAULT_MODEL` picks the model.
+- `detect.py`: YOLO11n via ONNX Runtime (GPU on Windows, CPU elsewhere). `CONF`, `NMS`.
+- `track.py`: IDs, positions, counts. `CONFIRM` (frames before an object counts), `FORGET` (seconds before it is gone).
+- `watch.py`: events and alerts. `UNATTENDED` seconds.
+- `memory.py`: the diary in `memory/` (not in git: it contains camera snapshots).
+- `voice.py`: `WHISPER` model, `VOICE_RATE`, `VOICE_VOLUME`.
+- `main.py`: camera loop, threads, overlay, keys. `MEMORY_EVERY`, `MAX_TOKENS`, prompts.
