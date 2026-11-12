@@ -1,8 +1,12 @@
-"""Fast object detection: OpenCV DNN + YOLO11n (80 everyday COCO classes).
+"""Fast object detection: YOLO11n (80 everyday COCO classes) on the GPU.
 
-~34 ms per frame on CPU, so it can box objects on every frame while the
-slower VLM describes the scene. Pure OpenCV (no PyTorch), so it also runs
-on a Raspberry Pi.
+ONNX Runtime runs the model: ~4 ms per frame on the RTX 5050 through DirectML
+(Windows), or ~33 ms on CPU. On a Raspberry Pi, `pip install onnxruntime`
+gives the CPU path with the same code. OpenCV does the image preparation,
+duplicate-box removal (NMS) and drawing.
+
+(OpenCV's own DNN module was tried first: the pip build has no CUDA, and its
+OpenCL path was slower than CPU on this machine.)
 
 How YOLO's raw output is read:
   the model returns 8400 candidate boxes; each is [cx, cy, w, h, 80 class scores].
@@ -13,6 +17,7 @@ import os
 
 import cv2
 import numpy as np
+import onnxruntime as ort
 
 MODEL = os.path.join(os.path.dirname(__file__), "yolo11n.onnx")
 SIZE = 640   # this ONNX export only accepts 640x640 input
@@ -33,7 +38,15 @@ NAMES = (
 
 if not os.path.exists(MODEL):
     raise SystemExit(f"Missing {MODEL}. Make it with: yolo export model=yolo11n.pt format=onnx")
-net = cv2.dnn.readNetFromONNX(MODEL)
+
+providers = ["CPUExecutionProvider"]
+if "DmlExecutionProvider" in ort.get_available_providers():
+    # high_performance = the NVIDIA GPU. Without it DirectML picks device 0,
+    # which on this laptop is the slow Intel integrated GPU (26 ms vs 4 ms).
+    providers.insert(0, ("DmlExecutionProvider", {"performance_preference": "high_performance"}))
+session = ort.InferenceSession(MODEL, providers=providers)
+INPUT = session.get_inputs()[0].name
+DEVICE = "GPU" if session.get_providers()[0] == "DmlExecutionProvider" else "CPU"
 
 
 def detect(frame):
@@ -43,8 +56,8 @@ def detect(frame):
     side = max(h, w)
     square = np.zeros((side, side, 3), np.uint8)
     square[:h, :w] = frame
-    net.setInput(cv2.dnn.blobFromImage(square, 1 / 255, (SIZE, SIZE), swapRB=True))
-    out = net.forward()[0].T                      # (8400, 84)
+    blob = cv2.dnn.blobFromImage(square, 1 / 255, (SIZE, SIZE), swapRB=True)
+    out = session.run(None, {INPUT: blob})[0][0].T  # (8400, 84)
     scores = out[:, 4:]
     cls, conf = scores.argmax(1), scores.max(1)
     keep = conf > CONF
@@ -78,7 +91,11 @@ if __name__ == "__main__":
             ok, frame = cam.read()
         cam.release()
     assert detect(np.zeros_like(frame)) == [], "blank image should have no detections"
-    dets = detect(frame)
+    import time
+    t = time.time()
+    for _ in range(50):
+        dets = detect(frame)
+    print(f"YOLO on {DEVICE}: {(time.time() - t) / 50 * 1000:.1f} ms per frame (incl. pre/post-processing)")
     for name, conf, box in dets:
         print(f"{name:15} {conf:.0%}  {box}")
     draw(frame, dets)
