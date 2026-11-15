@@ -28,6 +28,7 @@ import time
 import webbrowser
 from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 import cv2
 
@@ -74,7 +75,6 @@ def state():
 
 def diary(path):
     """Newest 100 diary entries, optionally filtered by ?q=word. For the Memory panel."""
-    from urllib.parse import parse_qs, urlparse
     q = parse_qs(urlparse(path).query).get("q", [""])[0].lower().strip()
     rows = [e for e in memory.entries if not q or q in e["text"].lower()]
     return [{"time": e["time"], "kind": e["kind"], "text": e["text"], "image": e.get("image")}

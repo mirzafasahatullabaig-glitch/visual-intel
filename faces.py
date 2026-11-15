@@ -9,16 +9,19 @@ Optional, like voice: if InsightFace or its model is missing, `ready` is False a
 the rest of the app runs unchanged.
 
     pip install insightface --no-deps      (the --no-deps keeps your onnxruntime-directml)
-    pip install onnx
+    pip install onnx scikit-image          (insightface needs these; onnx + skimage)
 
-Runs on the CPU here (ctx_id=-1): this machine's onnxruntime has DirectML + CPU but
-no CUDA, and InsightFace's CUDA path is the only GPU path it offers.
+Runs on the GPU through DirectML when available (same as detect.py), else CPU.
+ctx_id stays -1: InsightFace uses a positive ctx_id only to init CUDA, which this
+machine's onnxruntime (DirectML + CPU, no CUDA) does not have; DirectML placement
+happens through the providers list instead.
 """
 import json
 import os
 import threading
 import time
 
+import cv2
 import numpy as np
 
 DIR = os.path.join(os.path.dirname(__file__), "faces")
@@ -27,6 +30,7 @@ THRESHOLD = 0.35      # cosine above this = same named person (buffalo_l same-pe
 SAME_UNKNOWN = 0.30   # looser: is this the same unseen face as moments ago, to reuse its 'face #N'
 EVERY = 0.5           # seconds between face scans (CPU; slower than YOLO)
 MAX_PER_PERSON = 8    # keep at most this many embeddings per name (a few angles is plenty)
+MAX_UNKNOWN = 50      # cap unnamed faces cached this session, so a busy scene can't grow it forever
 
 ready = False
 _device = "CPU"       # set by _init(): "GPU" (DirectML) or "CPU"
@@ -107,6 +111,8 @@ def recognise(frame):
                     tid = f"face #{_next_unknown}"
                     _next_unknown += 1
                 _unknown[tid] = (emb, box)
+                if len(_unknown) > MAX_UNKNOWN:  # drop the oldest unnamed face
+                    del _unknown[next(iter(_unknown))]
                 name = tid
             out.append((name, box))
         _last["t"], _last["faces"] = now, out
@@ -115,6 +121,9 @@ def recognise(frame):
 
 def name_face(temp_id, person):
     """Give a name to a 'face #N' seen this session. Returns True if it was learned."""
+    person = person.strip()
+    if not person:  # the server is the trust boundary: never store a blank-named person
+        return False
     with _lock:
         if temp_id not in _unknown:
             return False
@@ -127,11 +136,11 @@ def name_face(temp_id, person):
 
 def unknown_faces():
     """Temp ids seen this session that still have no name, for the UI to offer."""
-    return list(_unknown)
+    with _lock:  # the face thread may be mutating _unknown while the web thread reads it
+        return list(_unknown)
 
 
 def draw(img, faces):
-    import cv2
     for label, (x, y, w, h) in faces:
         colour = (255, 180, 0) if label.startswith("face #") else (0, 220, 120)
         cv2.rectangle(img, (x, y), (x + w, y + h), colour, 2)
@@ -157,6 +166,17 @@ if __name__ == "__main__":
     _unknown["face #1"] = (b, (0, 0, 10, 10))
     assert name_face("face #1", "Sara") and _match(b) == "Sara", "naming did not stick"
     assert not name_face("face #99", "x"), "unknown id should return False"
+    # A blank or whitespace name is refused, even for a real temp id.
+    _unknown["face #2"] = (a, (0, 0, 10, 10))
+    assert not name_face("face #2", "   ") and "face #2" in _unknown, "blank name must not store"
+    _unknown.clear()
+    # The unknown cache is capped: adding past MAX_UNKNOWN drops the oldest.
+    for i in range(MAX_UNKNOWN + 5):
+        _unknown[f"face #{i}"] = (a, (0, 0, 1, 1))
+        if len(_unknown) > MAX_UNKNOWN:
+            del _unknown[next(iter(_unknown))]
+    assert len(_unknown) == MAX_UNKNOWN and "face #0" not in _unknown, "unknown cap failed"
+    _unknown.clear()
     # The store round-trips through JSON.
     known.clear()
     _load()
