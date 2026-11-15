@@ -32,7 +32,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import cv2
 
 import main as app
-from main import S, detect, memory, track, voice
+from main import S, detect, faces, memory, track, voice
 
 HOST, PORT = "127.0.0.1", 8765
 HOSTS = {f"localhost:{PORT}", f"127.0.0.1:{PORT}"}
@@ -59,6 +59,9 @@ def state():
         "level": voice.level if voice else 0,
         "counts": sorted(Counter(t["name"] for t in tracks).items()),
         "tracks": [{"label": track.label(t), "where": t["where"]} for t in tracks],
+        "faces_on": faces.ready,
+        "unknown": faces.unknown_faces(),   # temp ids the user can name
+        "faces": [label for label, _ in S["faces"]],
         "scene": S["text"],
         "scene_info": S["header"],
         "history": S["history"],
@@ -67,6 +70,15 @@ def state():
                    for when, text, alert in S["events"]],
         "zone": S["zone"],
     }
+
+
+def diary(path):
+    """Newest 100 diary entries, optionally filtered by ?q=word. For the Memory panel."""
+    from urllib.parse import parse_qs, urlparse
+    q = parse_qs(urlparse(path).query).get("q", [""])[0].lower().strip()
+    rows = [e for e in memory.entries if not q or q in e["text"].lower()]
+    return [{"time": e["time"], "kind": e["kind"], "text": e["text"], "image": e.get("image")}
+            for e in rows[-100:][::-1]]
 
 
 def set_zone(data):
@@ -119,6 +131,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.reply(200, f.read(), "text/html; charset=utf-8")
         elif self.path == "/state":
             self.reply(200, json.dumps(state()).encode())
+        elif self.path.startswith("/memory"):
+            self.reply(200, json.dumps(diary(self.path)).encode())
+        elif self.path.startswith("/snap/"):
+            self.snapshot(self.path[len("/snap/"):])
         elif self.path.startswith("/video"):
             self.video()
         else:
@@ -140,11 +156,24 @@ class Handler(BaseHTTPRequestHandler):
                 do(data["action"])
             elif self.path == "/zone":
                 set_zone(data)
+            elif self.path == "/name":
+                faces.name_face(str(data["id"]), str(data["name"]).strip()[:40])
             else:
                 return self.reply(404)
         except (ValueError, KeyError, TypeError, AttributeError):  # bad or incomplete request
             return self.reply(400)
         self.reply(200, b"{}")
+
+    def snapshot(self, name):
+        """Serve a diary snapshot by filename. Only plain .jpg names from the memory
+        folder: no path separators, so the browser cannot reach other files."""
+        if "/" in name or "\\" in name or not name.endswith(".jpg"):
+            return self.reply(403)
+        path = os.path.join(memory.DIR, name)
+        if not os.path.isfile(path):
+            return self.reply(404)
+        with open(path, "rb") as f:
+            self.reply(200, f.read(), "image/jpeg")
 
     def video(self):
         """Live video with boxes: one JPEG after another on the same connection."""

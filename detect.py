@@ -1,17 +1,22 @@
-"""Fast object detection: YOLO11n (80 everyday COCO classes) on the GPU.
+"""Fast object detection on the GPU, fixed 80 classes or an open vocabulary.
 
-ONNX Runtime runs the model: ~4 ms per frame on the RTX 5050 through DirectML
-(Windows), or ~33 ms on CPU. On a Raspberry Pi, `pip install onnxruntime`
-gives the CPU path with the same code. OpenCV does the image preparation,
-duplicate-box removal (NMS) and drawing.
+By default: YOLO11n, 80 everyday COCO classes, ~4 ms/frame on the RTX 5050 via
+DirectML (Windows), ~33 ms on CPU. On a Raspberry Pi, `pip install onnxruntime`
+gives the CPU path with the same code.
 
+Open vocabulary: run `python export_world.py` to bake a custom word list into
+yolo_world.onnx (YOLO-World; detects things COCO lacks, e.g. keys, wallet, box).
+If that file exists it is used automatically, ~12 ms/frame; delete it to fall
+back to YOLO11n. Both share the same output head, so the parsing below is identical.
+
+OpenCV does the image preparation, duplicate-box removal (NMS) and drawing.
 (OpenCV's own DNN module was tried first: the pip build has no CUDA, and its
 OpenCL path was slower than CPU on this machine.)
 
-How YOLO's raw output is read:
-  the model returns 8400 candidate boxes; each is [cx, cy, w, h, 80 class scores].
-  We keep candidates whose best score > CONF, then NMS removes duplicate boxes
-  that cover the same object.
+How the raw output is read:
+  the model returns 8400 candidate boxes; each is [cx, cy, w, h, <N> class scores]
+  (N = 80 for YOLO11n, or the custom vocab size). We keep candidates whose best
+  score > CONF, then NMS removes duplicate boxes that cover the same object.
 """
 import os
 
@@ -19,12 +24,12 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
-MODEL = os.path.join(os.path.dirname(__file__), "yolo11n.onnx")
 SIZE = 640   # this ONNX export only accepts 640x640 input
-CONF = 0.4   # minimum confidence to show a box
 NMS = 0.45   # overlap above which two boxes count as the same object
+# CONF is set below per model: YOLO-World scores lower than COCO-trained YOLO11n
+# (it matches text embeddings), so it needs a lower bar to catch the same objects.
 
-NAMES = (
+COCO = (
     "person,bicycle,car,motorcycle,airplane,bus,train,truck,boat,traffic light,"
     "fire hydrant,stop sign,parking meter,bench,bird,cat,dog,horse,sheep,cow,"
     "elephant,bear,zebra,giraffe,backpack,umbrella,handbag,tie,suitcase,frisbee,"
@@ -35,6 +40,21 @@ NAMES = (
     "cell phone,microwave,oven,toaster,sink,refrigerator,book,clock,vase,"
     "scissors,teddy bear,hair drier,toothbrush"
 ).split(",")
+
+# Open-vocabulary: if export_world.py has produced yolo_world.onnx, use it and its
+# custom word list; otherwise fall back to the fixed-80-class YOLO11n. Same output
+# layout (YOLOv8/world head), so detect() below is unchanged either way.
+WORLD = os.path.join(os.path.dirname(__file__), "yolo_world.onnx")
+if os.path.exists(WORLD):
+    MODEL = WORLD
+    CONF = 0.25   # YOLO-World scores lower; 0.25 catches objects 0.4 would drop (measured)
+    import json
+    with open(os.path.join(os.path.dirname(__file__), "yolo_world.names.json"), encoding="utf-8") as _f:
+        NAMES = json.load(_f)
+else:
+    MODEL = os.path.join(os.path.dirname(__file__), "yolo11n.onnx")
+    CONF = 0.4
+    NAMES = COCO
 
 if not os.path.exists(MODEL):
     raise SystemExit(f"Missing {MODEL}. Make it with: yolo export model=yolo11n.pt format=onnx")

@@ -28,6 +28,7 @@ import time
 import cv2
 
 import detect
+import faces
 import memory
 import track
 import vlm
@@ -70,6 +71,7 @@ S = {
     "qa": None,                 # (question, answer) pinned on screen
     "history": [],              # the last 20 (question, answer) pairs, for the web page
     "tracks": [],               # objects in view right now
+    "faces": [],                # (label, box) for faces in view: a name or 'face #N'
     "events": [],               # the last 50 (time, text, is_alert)
     "zone": None,               # restricted area (x1, y1, x2, y2)
     "drag": None,
@@ -126,6 +128,25 @@ def detect_loop():
         S["tracks"] = tracker.visible()
         for text, alert in watcher.check(S["tracks"], events, S["zone"]):
             note(text, alert, frame)
+
+
+def faces_loop():
+    """Background thread: face recognition. Its own thread because it runs on the CPU
+    and is far slower than YOLO; sharing detect_loop would stall tracking and alerts."""
+    if not faces.ready:
+        return
+    last, seen = None, set()
+    while S["running"]:
+        frame = S["frame"]
+        if frame is None or frame is last:
+            time.sleep(0.05)
+            continue
+        last = frame
+        S["faces"] = faces.recognise(frame)
+        for label, _ in S["faces"]:  # a known person appearing is a diary event
+            if not label.startswith("face #") and label not in seen:
+                seen.add(label)
+                note(f"{label} appeared", frame=frame)
 
 
 def analyse_loop():
@@ -269,6 +290,7 @@ def text_block(img, rows, top):
 def draw_boxes(img):
     """Object boxes with IDs, and the restricted zone."""
     detect.draw(img, [(track.label(t), t["conf"], t["box"]) for t in S["tracks"]])
+    faces.draw(img, S["faces"])
     if S["zone"]:
         x1, y1, x2, y2 = S["zone"]
         cv2.rectangle(img, (x1, y1), (x2, y2), RED, 2)
@@ -325,9 +347,9 @@ def camera_frames():
 def start_workers():
     """Start the background threads and print the status line."""
     sys.stdout.reconfigure(errors="replace")  # an emoji in a model answer must not crash a print
-    print(f"Model: {S['model']} | YOLO on {detect.DEVICE} | voice: {'on' if voice else 'off (see voice.py)'} "
-          f"| diary: {len(memory.entries)} entries")
-    for loop in (guarded(analyse_loop), guarded(detect_loop), read_questions):
+    print(f"Model: {S['model']} | YOLO on {detect.DEVICE} | faces: {faces._device if faces.ready else 'off'} "
+          f"| voice: {'on' if voice else 'off (see voice.py)'} | diary: {len(memory.entries)} entries")
+    for loop in (guarded(analyse_loop), guarded(detect_loop), guarded(faces_loop), read_questions):
         threading.Thread(target=loop, daemon=True).start()
 
 

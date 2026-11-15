@@ -1,5 +1,7 @@
 __pycache__/
 *.pyc
 *.onnx
+*.pt
 detect_test.jpg
 memory/
+faces/        # face embeddings tied to names: biometric data, never commit

@@ -25,6 +25,7 @@ SYNONYMS = [{"bottle", "drink", "water", "flask"}, {"laptop", "computer", "pc", 
             {"cup", "mug", "coffee", "tea"}, {"remote", "controller"}, {"tv", "television", "monitor", "screen"},
             {"book", "notebook"}, {"backpack", "bag"}, {"keyboard", "keys"}]
 SNAPSHOT_DAYS = 14   # delete saved snapshots older than this on startup
+MAX_ENTRIES = 50000  # cap the diary: oldest lines drop out of RAM and the log is rewritten
 
 
 def load(path):
@@ -68,8 +69,13 @@ def remember(kind, text, frame=None):
             entry["image"] = time.strftime("%Y%m%d-%H%M%S") + f"-{kind}.jpg"
             cv2.imwrite(os.path.join(DIR, entry["image"]), frame)
         entries.append(entry)
-        with open(LOG, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry) + "\n")
+        if len(entries) > MAX_ENTRIES:  # drop the oldest and rewrite the log to match
+            del entries[:-MAX_ENTRIES]
+            with open(LOG, "w", encoding="utf-8") as f:
+                f.writelines(json.dumps(e) + "\n" for e in entries)
+        else:
+            with open(LOG, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
     return entry
 
 
@@ -126,4 +132,11 @@ if __name__ == "__main__":
     assert prune_snapshots() == 1 and not os.path.exists(old)
     assert os.path.exists(os.path.join(DIR, e["image"])), "pruned a fresh snapshot"
     assert len(load(LOG)) == 22, "prune touched the log"
+    # The cap: once over MAX_ENTRIES, RAM and the log both hold exactly the newest MAX_ENTRIES.
+    MAX_ENTRIES = 5
+    entries.clear()
+    for i in range(8):
+        remember("scene", f"line {i}")
+    assert len(entries) == 5 and entries[0]["text"] == "line 3", entries[0]
+    assert len(load(LOG)) == 5, "log not trimmed to the cap"
     print("OK: memory works.")

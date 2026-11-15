@@ -90,7 +90,42 @@
   .feed .row.alert .txt{color:var(--alert); font-weight:500}
   .empty{color:var(--muted); padding:10px 14px; font-style:italic}
 
+  /* memory rows */
+  .mrow{display:flex; gap:10px; padding:8px 14px; border-top:1px solid var(--line); align-items:flex-start}
+  .mrow:first-child{border-top:none}
+  .mrow img{width:64px; height:48px; object-fit:cover; border-radius:6px; flex:none; background:#000; cursor:pointer}
+  .mrow .mt{color:var(--muted); font-size:11px; font-variant-numeric:tabular-nums}
+  .mrow .k{font-size:10px; text-transform:uppercase; letter-spacing:.4px; color:var(--accent)}
+  .mrow.alert .k{color:var(--alert)}
+
+  /* face naming */
+  .face{display:flex; gap:8px; align-items:center; margin-bottom:8px}
+  .face span{color:var(--warn)}
+  .face input{flex:1; font:inherit; color:var(--ink); background:var(--bg);
+              border:1px solid var(--line); border-radius:7px; padding:5px 9px}
+  .face input:focus{outline:none; border-color:var(--accent)}
+
   ::-webkit-scrollbar{width:8px} ::-webkit-scrollbar-thumb{background:var(--line);border-radius:4px}
+
+  /* connection banner */
+  #banner{display:none; padding:8px 18px; font-size:13px; text-align:center;
+          background:var(--alert); color:#160a0a; font-weight:500}
+  #banner.warn{background:var(--warn); color:#1a1405}
+
+  /* status dot states */
+  .dot.off{background:var(--muted)} .dot.warn{background:var(--warn)}
+
+  /* toasts */
+  #toasts{position:fixed; right:16px; bottom:16px; display:flex; flex-direction:column;
+          gap:8px; z-index:50; align-items:flex-end}
+  .toast{background:var(--surface2); border:1px solid var(--line); color:var(--ink);
+         border-radius:9px; padding:9px 14px; font-size:13px; box-shadow:0 6px 20px rgba(0,0,0,.4);
+         opacity:0; transform:translateY(8px); transition:opacity .18s, transform .18s; max-width:300px}
+  .toast.show{opacity:1; transform:none}
+  .toast.good{border-color:var(--good)} .toast.alert{border-color:var(--alert)}
+
+  /* smoothed numbers: no transition on text, but fade the scene text swap */
+  #scene{transition:opacity .15s}
 </style>
 </head>
 <body>
@@ -103,6 +138,8 @@
   <span class="grow"></span>
   <span class="pill" id="diary">diary: —</span>
 </header>
+<div id="banner"></div>
+<div id="toasts"></div>
 
 <main>
   <div class="col">
@@ -142,9 +179,23 @@
       </div>
     </div>
 
+    <div class="card" style="margin-top:16px" id="facescard" hidden>
+      <h2>Faces</h2>
+      <div class="pad" id="unknownfaces"></div>
+    </div>
+
     <div class="card" style="margin-top:16px">
       <h2>Activity</h2>
       <div class="feed" id="feed"></div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h2>Memory</h2>
+      <div class="ask" style="border-top:none">
+        <input id="msearch" placeholder="Search the diary…" onkeydown="if(event.key==='Enter')loadMemory()">
+        <button onclick="loadMemory()">Search</button>
+      </div>
+      <div class="feed" id="memory" style="max-height:340px"></div>
     </div>
   </div>
 </main>
@@ -153,9 +204,22 @@
 const $ = id => document.getElementById(id);
 $("video").src = "/video";
 
+// Toast: a brief corner notification. kind = "" | "good" | "alert".
+function toast(text, kind=""){
+  const t = document.createElement("div");
+  t.className = "toast " + kind;
+  t.textContent = text;
+  $("toasts").appendChild(t);
+  requestAnimationFrame(()=>t.classList.add("show"));
+  setTimeout(()=>{ t.classList.remove("show"); setTimeout(()=>t.remove(), 200); }, 2200);
+}
+
+const ACTION_MSG = {pause:"Paused/resumed", model:"Switching model…", voice:"Listening…",
+                    clear_zone:"Restricted zone cleared", stop:"Stopping…"};
 async function act(a){
   await fetch("/do", {method:"POST", headers:{"Content-Type":"application/json"},
                       body:JSON.stringify({action:a})});
+  if(ACTION_MSG[a]) toast(ACTION_MSG[a]);
 }
 async function send(){
   const q = $("q").value.trim();
@@ -166,47 +230,104 @@ async function send(){
 }
 
 // ---- restricted zone: drag on the video, send in camera pixels ----
-let drag = null, vsize = [640,480];
+let drag = null, dragging = false, vsize = [640,480];
 const wrap = $("videowrap"), box = $("zonebox");
-function toCam(e){
+
+// Letterbox geometry: the video is object-fit:contain, so it sits centred with bars.
+function geom(){
   const r = wrap.getBoundingClientRect();
-  // the image is object-fit:contain, so find the letterboxed area
   const scale = Math.min(r.width/vsize[0], r.height/vsize[1]);
-  const w = vsize[0]*scale, h = vsize[1]*scale;
-  const ox = (r.width-w)/2, oy = (r.height-h)/2;
-  const x = (e.clientX-r.left-ox)/scale, y = (e.clientY-r.top-oy)/scale;
-  return [Math.max(0,Math.min(vsize[0],x)), Math.max(0,Math.min(vsize[1],y))];
+  return {r, scale, ox:(r.width-vsize[0]*scale)/2, oy:(r.height-vsize[1]*scale)/2};
 }
-wrap.addEventListener("mousedown", e=>{ drag = toCam(e); });
-wrap.addEventListener("mousemove", e=>{
-  if(!drag) return;
-  const [x,y] = toCam(e), r = wrap.getBoundingClientRect();
-  const scale = Math.min(r.width/vsize[0], r.height/vsize[1]);
-  const ox=(r.width-vsize[0]*scale)/2, oy=(r.height-vsize[1]*scale)/2;
+function toCam(e){  // mouse event -> camera pixels, clamped to the frame
+  const {r, scale, ox, oy} = geom();
+  return [Math.max(0, Math.min(vsize[0], (e.clientX-r.left-ox)/scale)),
+          Math.max(0, Math.min(vsize[1], (e.clientY-r.top -oy)/scale))];
+}
+// Draw the box from camera-pixel coords (x1,y1,x2,y2), or hide it when null.
+// Single source of truth: poll() calls this with the server's zone, so it always matches
+// the video and survives window resize; during a drag we call it with the live rectangle.
+function drawZone(z){
+  if(!z){ box.style.display="none"; return; }
+  const {scale, ox, oy} = geom();
+  const [x1,y1,x2,y2] = z;
   box.style.display="block";
-  box.style.left = (Math.min(drag[0],x)*scale+ox)+"px";
-  box.style.top  = (Math.min(drag[1],y)*scale+oy)+"px";
-  box.style.width = (Math.abs(x-drag[0])*scale)+"px";
-  box.style.height= (Math.abs(y-drag[1])*scale)+"px";
+  box.style.left   = (Math.min(x1,x2)*scale+ox)+"px";
+  box.style.top    = (Math.min(y1,y2)*scale+oy)+"px";
+  box.style.width  = (Math.abs(x2-x1)*scale)+"px";
+  box.style.height = (Math.abs(y2-y1)*scale)+"px";
+}
+
+wrap.addEventListener("mousedown", e=>{ e.preventDefault(); drag = toCam(e); dragging = true; });
+window.addEventListener("mousemove", e=>{
+  if(!dragging) return;
+  const [x,y] = toCam(e);
+  drawZone([drag[0], drag[1], x, y]);   // live preview in camera coords
 });
 window.addEventListener("mouseup", async e=>{
-  if(!drag) return;
-  const [x,y] = toCam(e), [x0,y0] = drag; drag = null;
+  if(!dragging) return;
+  dragging = false;
+  const [x,y] = toCam(e), [x0,y0] = drag;
+  // Send in camera pixels; a tiny drag (a click) clears the zone, matching the OpenCV window.
   await fetch("/zone", {method:"POST", headers:{"Content-Type":"application/json"},
     body:JSON.stringify({x1:x0,y1:y0,x2:x,y2:y})});
+  // poll() will redraw from the server's authoritative zone on the next tick.
 });
+window.addEventListener("resize", ()=>drawZone(lastZone));
+
+// ---- memory browsing ----
+async function loadMemory(){
+  const q = encodeURIComponent($("msearch").value.trim());
+  const rows = await (await fetch("/memory?q=" + q)).json();
+  $("memory").innerHTML = rows.length ? rows.map(r=>
+    `<div class="mrow ${r.kind==='alert'?'alert':''}">`+
+    (r.image ? `<img src="/snap/${encodeURIComponent(r.image)}" onclick="window.open(this.src)">` : "")+
+    `<div><div class="mt">${esc(r.time)} · <span class="k">${esc(r.kind)}</span></div>`+
+    `<div>${esc(r.text)}</div></div></div>`).join("")
+    : `<div class="empty">nothing in the diary${q?" for that search":""}</div>`;
+}
+loadMemory();
+
+// ---- naming faces ----
+async function nameFace(id, input){
+  const name = input.value.trim();
+  if(!name) return;
+  await fetch("/name", {method:"POST", headers:{"Content-Type":"application/json"},
+                        body:JSON.stringify({id, name})});
+  toast("Learned: " + name, "good");
+  loadMemory();  // the new person will start appearing in the diary
+}
+let shownUnknown = "";
 
 // ---- poll state and render ----
 function esc(s){ const d=document.createElement("div"); d.textContent=s; return d.innerHTML; }
-let shownHistory = -1;
+let shownHistory = -1, shownEvents = "", shownCounts = "", lastZone = null;
+
+function banner(text, cls){
+  const b = $("banner");
+  if(!text){ b.style.display="none"; return; }
+  b.textContent = text; b.className = cls || ""; b.style.display="block";
+}
 
 async function poll(){
   let s;
   try{ s = await (await fetch("/state")).json(); }
-  catch{ $("livedot").className="dot"; return; }
+  catch{  // server unreachable: it was stopped, or crashed
+    $("livedot").className = "dot off";
+    banner("Lost connection to the app. Is it still running?", "");
+    return;
+  }
 
   vsize = s.size;
-  $("livedot").className = "dot" + (s.live ? " on" : "");
+  lastZone = s.zone;
+  if(!dragging) drawZone(s.zone);   // server zone is authoritative except while dragging
+
+  // Connection / health banner: server down > Ollama down > camera off > clear.
+  const ollamaDown = (s.scene_info||"").startsWith("ERROR");
+  if(ollamaDown)      banner("The vision model is not reachable. Is Ollama running?", "warn");
+  else if(!s.live)    banner("Waiting for the camera…", "warn");
+  else                banner("");
+  $("livedot").className = "dot" + (ollamaDown ? " warn" : s.live ? " on" : " off");
   $("nolive").style.display = s.live ? "none" : "flex";
   $("model").textContent = s.model;
   $("yolo").textContent = "YOLO: " + s.yolo;
@@ -217,10 +338,14 @@ async function poll(){
   $("pause").textContent = s.paused ? "Resume" : "Pause";
   $("pause").classList.toggle("active", s.paused);
 
-  // counts
-  $("counts").innerHTML = s.counts.length
-    ? s.counts.map(([name,n])=>`<span class="chip"><b>${n}</b> ${esc(name)}</span>`).join("")
-    : `<span class="chip">nothing in view</span>`;
+  // counts - only rebuild when they change
+  const csig = JSON.stringify(s.counts);
+  if(csig !== shownCounts){
+    shownCounts = csig;
+    $("counts").innerHTML = s.counts.length
+      ? s.counts.map(([name,n])=>`<span class="chip"><b>${n}</b> ${esc(name)}</span>`).join("")
+      : `<span class="chip">nothing in view</span>`;
+  }
 
   // voice
   const mic = $("mic");
@@ -242,14 +367,38 @@ async function poll(){
     const log = $("chatlog"); log.innerHTML = html; log.scrollTop = log.scrollHeight;
   }
 
-  // activity feed (newest first)
-  $("feed").innerHTML = s.events.length
-    ? s.events.slice().reverse().map(([t,txt,alert])=>
-        `<div class="row ${alert?'alert':''}"><span class="t">${esc(t)}</span>`+
-        `<span class="txt">${alert?'⚠ ':''}${esc(txt)}</span></div>`).join("")
-    : `<div class="empty">no events yet</div>`;
+  // faces: offer to name the unknown ones (only rebuild when the set changes)
+  $("facescard").hidden = !s.faces_on;
+  if(s.faces_on){
+    const sig = (s.unknown||[]).join(",");
+    if(sig !== shownUnknown){
+      shownUnknown = sig;
+      const u = s.unknown || [];
+      $("unknownfaces").innerHTML = u.length
+        ? u.map(id=>`<div class="face"><span>${esc(id)}</span>`+
+            `<input placeholder="name this person" onkeydown="if(event.key==='Enter')nameFace('${esc(id)}',this)">`+
+            `</div>`).join("")
+        : `<div class="empty" style="padding:0">everyone in view is known</div>`;
+    }
+  }
+
+  // activity feed (newest first) - only rebuild when the events changed
+  const esig = s.events.length + "|" + (s.events.length ? s.events[s.events.length-1][0] : "");
+  if(esig !== shownEvents){
+    // Toast any new alert so it isn't missed (skip the very first poll, which loads history).
+    if(shownEvents !== "" && s.events.length){
+      const [, txt, alert] = s.events[s.events.length-1];
+      if(alert) toast("⚠ " + txt, "alert");
+    }
+    shownEvents = esig;
+    $("feed").innerHTML = s.events.length
+      ? s.events.slice().reverse().map(([t,txt,alert])=>
+          `<div class="row ${alert?'alert':''}"><span class="t">${esc(t)}</span>`+
+          `<span class="txt">${alert?'⚠ ':''}${esc(txt)}</span></div>`).join("")
+      : `<div class="empty">no events yet</div>`;
+  }
 }
-setInterval(poll, 400);
+setInterval(poll, 200);
 poll();
 </script>
 </body>
