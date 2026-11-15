@@ -83,6 +83,8 @@ def diary(path):
 
 def set_zone(data):
     """Zone from the page, in camera pixels. Too small to be a drag = clear it."""
+    if S["frame"] is None:  # a zone POST before the first frame (startup/shutdown): ignore it
+        return
     h, w = S["frame"].shape[:2]
     x1, x2 = sorted(max(0, min(w, int(data[k]))) for k in ("x1", "x2"))
     y1, y2 = sorted(max(0, min(h, int(data[k]))) for k in ("y1", "y2"))

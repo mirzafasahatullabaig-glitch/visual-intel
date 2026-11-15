@@ -40,7 +40,10 @@ def ask(image_bytes, prompt, model=DEFAULT_MODEL, timeout=120, max_tokens=None):
         headers={"Content-Type": "application/json"},
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read())["response"].strip()
+        data = json.loads(resp.read())
+    if "response" not in data:  # e.g. model not pulled: Ollama returns {"error": "..."}
+        raise RuntimeError(data.get("error", "no response from Ollama"))
+    return data["response"].strip()
 
 
 if __name__ == "__main__":

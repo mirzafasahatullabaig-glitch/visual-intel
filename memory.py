@@ -71,8 +71,13 @@ def remember(kind, text, frame=None):
         entries.append(entry)
         if len(entries) > MAX_ENTRIES:  # drop the oldest and rewrite the log to match
             del entries[:-MAX_ENTRIES]
-            with open(LOG, "w", encoding="utf-8") as f:
+            # Atomic rewrite: write a temp file, then os.replace over the log. A crash
+            # mid-write leaves the old log intact, never a truncated one (the diary's
+            # whole promise is to survive restarts).
+            tmp = LOG + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 f.writelines(json.dumps(e) + "\n" for e in entries)
+            os.replace(tmp, LOG)
         else:
             with open(LOG, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry) + "\n")

@@ -39,6 +39,27 @@ Known limits:
   Do not run a plain `pip install faster-whisper`: it installs CPU `onnxruntime`, which replaces `onnxruntime-directml` and puts YOLO back on the CPU. On a Raspberry Pi / Linux use `onnxruntime` (CPU) and `espeak` for speech.
 - `yolo11n.onnx` in this folder (not in git, 10 MB). Make it with `pip install ultralytics` then `yolo export model=yolo11n.pt format=onnx`
 
+### Optional features
+Both degrade gracefully: if their packages are missing, that feature is just off and the rest runs.
+
+- **Face recognition** (recognise and name people; faces on the GPU via DirectML):
+  ```
+  pip install insightface --no-deps      # --no-deps keeps onnxruntime-directml
+  pip install onnx scikit-image
+  ```
+  The `buffalo_l` model downloads on first run (~300 MB). Known faces live in `faces/known.json` (gitignored: biometric data).
+- **Open-vocabulary detection** (detect objects COCO lacks — keys, wallet, box...):
+  ```
+  pip install -U ultralytics
+  pip install ftfy regex
+  pip install git+https://github.com/openai/CLIP.git --no-deps
+  python export_world.py                 # edit the VOCAB list first; makes yolo_world.onnx
+  ```
+  Once `yolo_world.onnx` exists, `detect.py` uses it automatically (delete it to fall back to YOLO11n).
+
+## Web interface
+`python web.py` serves the same system as a page at `http://localhost:8765` (localhost only): live video, chat (typed or voice), object counts, the restricted zone, the activity feed, a searchable memory browser, and naming faces.
+
 ## Use
 ```
 python main.py          # or: python main.py qwen
