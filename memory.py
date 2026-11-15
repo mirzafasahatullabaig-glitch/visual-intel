@@ -18,6 +18,13 @@ LOG = os.path.join(DIR, "log.jsonl")
 STOPWORDS = {"where", "what", "when", "which", "there", "that", "this", "with", "have", "does", "were", "been",
              "the", "was", "did", "you", "are", "any", "has", "for", "and", "not", "who", "how", "why", "can",
              "see", "put", "get", "its", "his", "her", "our", "out", "now"}
+# Words the camera never uses (YOLO's labels) matched to how a person asks for them.
+# Each line is one group: asking for any word in it searches the diary for all of them.
+SYNONYMS = [{"bottle", "drink", "water", "flask"}, {"laptop", "computer", "pc", "macbook"},
+            {"cell", "phone", "mobile", "smartphone"}, {"person", "people", "someone", "somebody", "man", "woman"},
+            {"cup", "mug", "coffee", "tea"}, {"remote", "controller"}, {"tv", "television", "monitor", "screen"},
+            {"book", "notebook"}, {"backpack", "bag"}, {"keyboard", "keys"}]
+SNAPSHOT_DAYS = 14   # delete saved snapshots older than this on startup
 
 
 def load(path):
@@ -33,9 +40,23 @@ def load(path):
     return found
 
 
+def prune_snapshots(days=SNAPSHOT_DAYS):
+    """Delete .jpg snapshots older than `days`. The log keeps the text line either way;
+    only the image goes, so old entries stay searchable, they just lose their picture."""
+    cutoff = time.time() - days * 86400
+    removed = 0
+    for name in os.listdir(DIR) if os.path.isdir(DIR) else []:
+        path = os.path.join(DIR, name)
+        if name.endswith(".jpg") and os.path.getmtime(path) < cutoff:
+            os.remove(path)
+            removed += 1
+    return removed
+
+
 os.makedirs(DIR, exist_ok=True)
 # shortcut: the whole diary is kept in RAM; fine to ~100k lines, switch to SQLite beyond that.
 entries = load(LOG)
+prune_snapshots()
 _lock = threading.Lock()  # two threads write here (tracker events, VLM descriptions)
 
 
@@ -57,6 +78,10 @@ def recall(question, recent=8, matching=8):
     older lines that mention a word from the question (e.g. 'bottle')."""
     words = {w.strip("?.,!'\"").lower() for w in question.split()}
     words = {w for w in words if len(w) > 2 and w not in STOPWORDS}
+    # Pull in synonyms so "drink" also finds diary lines about "bottle".
+    for group in SYNONYMS:
+        if words & group:
+            words |= group
     # Only what the camera observed counts as memory. Earlier answers stay in the
     # file, but are not fed back: a wrong answer would be repeated as if it were a fact.
     facts = [e for e in entries if e["kind"] != "question"]
@@ -91,4 +116,14 @@ if __name__ == "__main__":
     with open(LOG, "a", encoding="utf-8") as f:
         f.write('{"time": "2026-11-13 10:00:00", "kind": "ev')
     assert len(load(LOG)) == 22, len(load(LOG))
+    # Synonyms: a word the camera never uses must still find the camera's word.
+    got = recall("where is my drink?")
+    assert "bottle #4 disappeared" in got, got
+    # Prune: an old snapshot goes, a fresh one stays, and the log line is untouched.
+    old = os.path.join(DIR, "20200101-000000-alert.jpg")
+    cv2.imwrite(old, np.zeros((4, 4, 3), np.uint8))
+    os.utime(old, (0, 0))  # mtime = 1970
+    assert prune_snapshots() == 1 and not os.path.exists(old)
+    assert os.path.exists(os.path.join(DIR, e["image"])), "pruned a fresh snapshot"
+    assert len(load(LOG)) == 22, "prune touched the log"
     print("OK: memory works.")
