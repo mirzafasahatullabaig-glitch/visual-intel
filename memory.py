@@ -66,8 +66,10 @@ def remember(kind, text, frame=None):
     entry = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "kind": kind, "text": text}
     with _lock:
         if frame is not None:
-            entry["image"] = time.strftime("%Y%m%d-%H%M%S") + f"-{kind}.jpg"
-            cv2.imwrite(os.path.join(DIR, entry["image"]), frame)
+            # A short random suffix so two events in the same second don't overwrite.
+            name = time.strftime("%Y%m%d-%H%M%S") + f"-{kind}-{os.urandom(2).hex()}.jpg"
+            if cv2.imwrite(os.path.join(DIR, name), frame):  # only reference it if the write worked
+                entry["image"] = name
         entries.append(entry)
         if len(entries) > MAX_ENTRIES:  # drop the oldest and rewrite the log to match
             del entries[:-MAX_ENTRIES]

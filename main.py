@@ -101,15 +101,26 @@ def note(text, alert=False, frame=None):
 
 
 def guarded(loop):
-    """Wrap a background loop so a crash is reported and the loop restarts.
-    (A thread that dies silently would freeze its feature for the rest of the session.)"""
+    """Wrap a background loop so a crash is reported and the loop restarts, with
+    escalating backoff so a loop that fails instantly can't spin the CPU or flood
+    the diary. After too many fast failures in a row, give up on that loop.
+    A loop that simply returns (e.g. faces off) also stops here, not a busy spin."""
     def run():
+        fails = 0
         while S["running"]:
+            start = time.time()
             try:
                 loop()
             except Exception as e:
+                ran = time.time() - start
+                fails = 1 if ran > 30 else fails + 1  # reset if it ran a while before dying
+                if fails > 5:
+                    show(f"{loop.__name__} failed {fails} times; stopping it.", alert=True)
+                    return
                 show(f"{loop.__name__} error, restarting: {e}", alert=True)
-                time.sleep(1)
+                time.sleep(min(2 ** fails, 30))  # 2,4,8,16,30s
+                continue
+            return  # loop returned on its own (not a crash): done, don't respin
     return run
 
 
